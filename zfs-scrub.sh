@@ -1,15 +1,16 @@
 #!/bin/sh
 ## #!/bin/bash
  
-#VERSION: 0.2
-#AUTHOR: gimpe
+#VERSION: 0.3
+#AUTHOR: gimpe, m.vernimmen
 #EMAIL: gimpe [at] hype-o-thetic.com
-#WEBSITE: http://hype-o-thetic.com
+#WEBSITE: https://github.com/mvernimmen/zfs
 #DESCRIPTION: Created on FreeNAS 0.7RC1 (Sardaukar)
-# This script will start a scrub on each ZFS pool (one at a time) and
-# will send an e-mail or display the result when everyting is completed.
+# This script will start a scrub on each ZFS pool and
+# send; an e-mail or display the result when everyting is completed.
  
 #CHANGELOG
+# 0.3: 2017-02-12 M.vernimmen - update code, fix some bugs for Linux
 # 0.2: 2009-08-27 Code clean up
 # 0.1: 2009-08-25 Make it work
  
@@ -21,7 +22,7 @@
 # e-mail variables
 FROM=from@server.com
 TO=to@fqdn.com
-SUBJECT="$0 results"
+SUBJECT="[ZFS scrub report] $0 results"
 BODY=""
  
 # arguments
@@ -57,7 +58,6 @@ done
 # work variables
 ERROR=0
 SEP=" - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - "
-RUNNING=1
  
 # commands & configuration
 ZPOOL=/usr//sbin/zpool
@@ -66,54 +66,68 @@ MSMTP=/usr/local/bin/msmtp
 MSMTPCONF=/var/etc/msmtp.conf
  
 # print a message
-function _log {
-    DATE="$(date +"%Y-%m-%d %H:%M:%S")"
-    # add message to e-mail body
-    BODY="${BODY}$DATE: $1\n"
+_log() {
+  DATE="$(date +"%Y-%m-%d %H:%M:%S")"
+  # add message to e-mail body
+  BODY="${BODY}$DATE: $1\n"
+# if the above productes literal \n's, try \\n
+#  BODY="${BODY}$DATE: $1\\n"
  
-    # output to console if verbose mode
-    if [ $VERBOSE = 1 ]; then
-        echo "$DATE: $1"
-    fi
+  # output to console if verbose mode
+  if [ $VERBOSE = 1 ]; then
+    echo "$DATE: $1"
+  fi
 }
  
-# find all pools
-pools=$($ZPOOL list -H -o name)
- 
-# for each pool
-for pool in $pools; do
-    # start scrub for $pool
-    _log "starting scrub on ${pool}"
-    zpool scrub $pool
-    RUNNING=1
-    # wait until scrub for $pool has finished running
-    while [ $RUNNING = 1 ];     do
+trap "echo \"waiting for threads to finish\";wait; echo \"we got interrupted, exiting\"" TERM EXIT
+
+scrub() {
+  local pool=$1
+  local SCRUBBING=1
+
+  _log "starting scrub on $pool"
+  zpool scrub "${pool}"
+
+  # wait until scrub for $pool has finished running
+  while [ $SCRUBBING = 1 ];     do
         # still running?
         if $ZPOOL status -v $pool | grep -q "scrub in progress"; then
             sleep 60
         # not running
         else
             # finished with this pool, exit
-            _log "scrub ended on ${pool}"
-	    _log "$($ZPOOL status -v ${pool})"
-            _log "${SEP}"
-            RUNNING=0
+            _log "scrub ended on $pool"
+            _log "`$ZPOOL status -v $pool`"
+            _log "$SEP"
+            SCRUBBING=0
             # check for errors
-            if ! $ZPOOL status -v $pool | grep -q "No known data errors"; then
-                _log "data errors detected on ${pool}"
+            if ! "${ZPOOL}" status -v "${pool}" | grep -q "No known data errors"; then
+                _log "data errors detected on $pool"
                 ERROR=1
             fi
         fi
-    done
+  done
+}
+
+
+# MAIN
+
+# find all pools
+pools=$($ZPOOL list -H -o name)
+
+for pool in $pools; do
+  # start scrub for $pooli in a separate thread
+  scrub $pool &
 done
- 
+wait
+
 # change e-mail subject if there was error
 if [ $ERROR = 1 ]; then
-    SUBJECT="${SUBJECT}: ERROR(S) DETECTED"
+  SUBJECT="${SUBJECT}: ERROR(S) DETECTED"
 fi
  
 # send e-mail
 if [ $SENDEMAIL = 1 ]; then
-	$(echo "$BODY" | mail -s \'${SUBJECT}\' $TO -r ${FROM})
+  $(echo "$BODY" | mail -s \'$SUBJECT\' $TO -r ${FROM})
 fi
 
